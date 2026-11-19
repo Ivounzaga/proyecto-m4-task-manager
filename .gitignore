@@ -28,3 +28,10 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Configuración local de Vercel
+.vercel/
+
+# Dependencias y compilación
+node_modules/
+dist/

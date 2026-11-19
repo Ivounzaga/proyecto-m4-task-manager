@@ -38,8 +38,17 @@ function App() {
 
   return (
     <>
-      <Header />
-
+      <Header>
+        {user && (
+          <button
+            type="button"
+            className="tm-logout-button"
+            onClick={handleLogout}
+          >
+            Cerrar sesión
+          </button>
+        )}
+      </Header>
       <main>
         {loadingSession ? (
           <p>Verificando sesión...</p>
@@ -83,10 +92,6 @@ function App() {
                 element={
                   <ProtectedRoute user={user}>
                     <p>Bienvenido, {user?.email}</p>
-
-                    <button type="button" onClick={handleLogout}>
-                      Cerrar sesión
-                    </button>
 
                     {logoutError && <p role="alert">{logoutError}</p>}
 

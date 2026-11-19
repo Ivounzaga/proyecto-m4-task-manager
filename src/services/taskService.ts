@@ -9,17 +9,19 @@ import {
     doc,
     updateDoc,
     deleteDoc,
-
+    writeBatch,
     type Unsubscribe,
 } from 'firebase/firestore';
 
 import { auth, db } from './firebase';
-import type { Task } from '../types/tasks';
+import type { Task, TaskPriority } from '../types/tasks';
 
-// CREATE: crear una tarea
+// CREATE
 export async function createTask(
     title: string,
-    description: string
+    description: string,
+    priority: TaskPriority = 'medium',
+    dueDate: string = ''
 ): Promise<string> {
     const user = auth.currentUser;
 
@@ -28,24 +30,29 @@ export async function createTask(
     }
 
     const cleanTitle = title.trim();
-    const cleanDescription = description.trim();
 
     if (!cleanTitle) {
         throw new Error('El título es obligatorio.');
     }
 
-    const docRef = await addDoc(collection(db, 'tasks'), {
-        userId: user.uid,
-        title: cleanTitle,
-        description: cleanDescription,
-        completed: false,
-        createdAt: serverTimestamp(),
-    });
+    const taskRef = await addDoc(
+        collection(db, 'tasks'),
+        {
+            userId: user.uid,
+            title: cleanTitle,
+            description: description.trim(),
+            completed: false,
+            createdAt: serverTimestamp(),
+            priority,
+            dueDate,
+            order: Date.now(),
+        }
+    );
 
-    return docRef.id;
+    return taskRef.id;
 }
 
-// READ: escuchar las tareas del usuario
+// READ: 
 export function subscribeToMyTasks(
     onTasks: (tasks: Task[]) => void,
     onError: (error: Error) => void
@@ -65,12 +72,14 @@ export function subscribeToMyTasks(
     return onSnapshot(
         tasksQuery,
         (snapshot) => {
-            const tasks: Task[] = snapshot.docs.map((document) => ({
-                ...(document.data({
-                    serverTimestamps: 'estimate',
-                }) as Omit<Task, 'id'>),
-                id: document.id,
-            }));
+            const tasks: Task[] = snapshot.docs.map(
+                (document) => ({
+                    ...(document.data({
+                        serverTimestamps: 'estimate',
+                    }) as Omit<Task, 'id'>),
+                    id: document.id,
+                })
+            );
 
             onTasks(tasks);
         },
@@ -78,61 +87,100 @@ export function subscribeToMyTasks(
     );
 }
 
-
+// UPDATE: 
 export async function updateTaskCompleted(
     taskId: string,
     completed: boolean
 ): Promise<void> {
-    const user = auth.currentUser;
-
-    if (!user) {
+    if (!auth.currentUser) {
         throw new Error('Tenés que iniciar sesión.');
     }
 
-    const taskRef = doc(db, 'tasks', taskId);
-
-    await updateDoc(taskRef, {
-        completed: completed,
-    });
+    await updateDoc(
+        doc(db, 'tasks', taskId),
+        { completed }
+    );
 }
 
-
+// UPDATE: 
 export async function updateTaskDetails(
     taskId: string,
     title: string,
-    description: string
+    description: string,
+    priority: TaskPriority = 'medium',
+    dueDate: string = ''
 ): Promise<void> {
-    const user = auth.currentUser;
-
-    if (!user) {
+    if (!auth.currentUser) {
         throw new Error('Tenés que iniciar sesión.');
     }
 
     const cleanTitle = title.trim();
-    const cleanDescription = description.trim();
 
     if (!cleanTitle) {
         throw new Error('El título es obligatorio.');
     }
 
-    const taskRef = doc(db, 'tasks', taskId);
-
-    await updateDoc(taskRef, {
-        title: cleanTitle,
-        description: cleanDescription,
-    });
+    await updateDoc(
+        doc(db, 'tasks', taskId),
+        {
+            title: cleanTitle,
+            description: description.trim(),
+            priority,
+            dueDate,
+        }
+    );
 }
 
-
-export async function deleteTask(taskId: string): Promise<void> {
+// UPDATE
+export async function saveTaskOrder(
+    taskIds: string[]
+): Promise<void> {
     const user = auth.currentUser;
 
     if (!user) {
         throw new Error('Tenés que iniciar sesión.');
     }
 
-    const taskRef = doc(db, 'tasks', taskId);
 
-    await deleteDoc(taskRef);
+    if (
+        taskIds.some((id) => !id) ||
+        new Set(taskIds).size !== taskIds.length
+    ) {
+        throw new Error(
+            'La lista contiene identificadores inválidos o repetidos.'
+        );
+    }
+
+
+    if (taskIds.length > 400) {
+        throw new Error(
+            'Demasiadas tareas para guardar el orden.'
+        );
+    }
+
+    if (taskIds.length === 0) return;
+
+    const batch = writeBatch(db);
+
+    taskIds.forEach((taskId, index) => {
+        batch.update(
+            doc(db, 'tasks', taskId),
+            { order: index }
+        );
+    });
+
+    await batch.commit();
 }
 
+// DELETE
+export async function deleteTask(
+    taskId: string
+): Promise<void> {
+    if (!auth.currentUser) {
+        throw new Error('Tenés que iniciar sesión.');
+    }
+
+    await deleteDoc(
+        doc(db, 'tasks', taskId)
+    );
+}

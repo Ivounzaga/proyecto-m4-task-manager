@@ -1,5 +1,5 @@
-
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { DragEndEvent } from '@dnd-kit/core';
 
 import {
     createTask,
@@ -7,29 +7,46 @@ import {
     updateTaskCompleted,
     updateTaskDetails,
     deleteTask,
+    saveTaskOrder,
 } from '../services/taskService';
+import type { Task, TaskPriority } from '../types/tasks';
+import { moveTask, sortTasksByOrder } from '../utils/taskOrder';
 
-import type { Task } from '../types/tasks';
+import CreateTaskModal, {
+    type CreateTaskInput,
+} from '../components/createTaskModal';
+import EmailSummary from '../components/EmailSummary';
+import TaskStats from '../components/TaskStats';
+import TaskFilters, { type TaskFilter } from '../components/TaskFilters';
+import TaskList from '../components/TaskList';
+
+const PRIORITY_RANK: Record<TaskPriority, number> = {
+    low: 1,
+    medium: 2,
+    high: 3,
+};
 
 function TasksPage() {
-    const [title, setTitle] = useState('');
-    const [description, setDescription] = useState('');
-
+    // Estados que afectan a toda la pagina.
     const [tasks, setTasks] = useState<Task[]>([]);
-
-    const [loading, setLoading] = useState(false);
     const [loadingTasks, setLoadingTasks] = useState(true);
+    const [loadError, setLoadError] = useState('');
+
+    const [filter, setFilter] = useState<TaskFilter>('all');
+    const [sortByPriority, setSortByPriority] = useState(false);
+    const [savingOrder, setSavingOrder] = useState(false);
+
+    const [showCreateModal, setShowCreateModal] = useState(false);
+    const [creatingTask, setCreatingTask] = useState(false);
+    const addTaskButtonRef = useRef<HTMLButtonElement>(null);
+
+    const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
     const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
 
     const [error, setError] = useState('');
-    const [loadError, setLoadError] = useState('');
     const [success, setSuccess] = useState('');
 
-    const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-    const [editTitle, setEditTitle] = useState('');
-    const [editDescription, setEditDescription] = useState('');
-
-    // READ: escuchar las tareas de Firestore
+    // Una sola suscripcion en tiempo real para toda la pagina.
     useEffect(() => {
         const unsubscribe = subscribeToMyTasks(
             (newTasks) => {
@@ -37,8 +54,8 @@ function TasksPage() {
                 setLoadError('');
                 setLoadingTasks(false);
             },
-            (error) => {
-                console.error('Error al cargar tareas:', error);
+            (subscriptionError) => {
+                console.error('Error al cargar tareas:', subscriptionError);
                 setLoadError('No se pudieron cargar las tareas.');
                 setLoadingTasks(false);
             }
@@ -47,91 +64,111 @@ function TasksPage() {
         return () => unsubscribe();
     }, []);
 
-    // CREATE: crear una tarea
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
 
+    const manuallySortedTasks = sortTasksByOrder(tasks);
+    const filteredTasks = manuallySortedTasks
+        .filter((task) => {
+            if (filter === 'completed') return task.completed;
+            if (filter === 'pending') return !task.completed;
+            return true;
+        })
+        .sort((a, b) => {
+            if (!sortByPriority) return 0;
+            return (
+                PRIORITY_RANK[b.priority ?? 'medium'] -
+                PRIORITY_RANK[a.priority ?? 'medium']
+            );
+        });
+
+    const dragEnabled =
+        filter === 'all' &&
+        !sortByPriority &&
+        !savingOrder &&
+        editingTaskId === null &&
+        updatingTaskId === null;
+
+    function openCreateModal() {
+        setError('');
+        setShowCreateModal(true);
+    }
+
+    function closeCreateModal() {
+        if (creatingTask) return;
+        setShowCreateModal(false);
+        setError('');
+        addTaskButtonRef.current?.focus();
+    }
+
+    async function handleCreateTask(values: CreateTaskInput): Promise<void> {
         setError('');
         setSuccess('');
-        setLoading(true);
+        setCreatingTask(true);
 
         try {
-            await createTask(title, description);
-
+            await createTask(
+                values.title,
+                values.description,
+                values.priority,
+                values.dueDate
+            );
             setSuccess('Tarea creada correctamente');
-            setTitle('');
-            setDescription('');
-        } catch (error) {
-            console.error('Error al crear tarea:', error);
+            setShowCreateModal(false);
+            addTaskButtonRef.current?.focus();
+        } catch (creationError) {
+            console.error('Error al crear tarea:', creationError);
             setError('No se pudo crear la tarea.');
         } finally {
-            setLoading(false);
+            setCreatingTask(false);
         }
     }
 
-    // UPDATE: completar o reabrir una tarea
-    async function handleToggleCompleted(task: Task) {
+    async function handleToggleCompleted(task: Task): Promise<void> {
         setError('');
         setSuccess('');
         setUpdatingTaskId(task.id);
 
         try {
             await updateTaskCompleted(task.id, !task.completed);
-
             setSuccess(
                 task.completed
                     ? 'Tarea marcada como pendiente.'
                     : 'Tarea completada correctamente.'
             );
-        } catch (error) {
-            console.error('Error al actualizar tarea:', error);
+        } catch (updateError) {
+            console.error('Error al actualizar tarea:', updateError);
             setError('No se pudo actualizar la tarea.');
         } finally {
             setUpdatingTaskId(null);
         }
     }
 
-    function handleStartEditing(task: Task) {
-        setEditingTaskId(task.id);
-        setEditTitle(task.title);
-        setEditDescription(task.description);
-    }
-
-
-    async function handleSaveEditing(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-
-        if (!editingTaskId) return;
-
+    async function handleSaveEditing(
+        taskId: string,
+        title: string,
+        description: string,
+        priority: TaskPriority,
+        dueDate: string
+    ): Promise<void> {
         setError('');
         setSuccess('');
-        setUpdatingTaskId(editingTaskId);
+        setUpdatingTaskId(taskId);
 
         try {
-            await updateTaskDetails(
-                editingTaskId,
-                editTitle,
-                editDescription
-            );
-
+            await updateTaskDetails(taskId, title, description, priority, dueDate);
             setSuccess('Tarea actualizada correctamente');
             setEditingTaskId(null);
-            setEditTitle('');
-            setEditDescription('');
-        } catch (error) {
-            console.error('Error al editar tarea:', error);
+        } catch (updateError) {
+            console.error('Error al editar tarea:', updateError);
             setError('No se pudo editar la tarea.');
         } finally {
             setUpdatingTaskId(null);
         }
     }
 
-
-    async function handleDeleteTask(task: Task) {
+    async function handleDeleteTask(task: Task): Promise<void> {
         const confirmed = window.confirm(
             `¿Estás seguro de eliminar la tarea "${task.title}"?`
         );
-
         if (!confirmed) return;
 
         setError('');
@@ -140,161 +177,137 @@ function TasksPage() {
 
         try {
             await deleteTask(task.id);
-
             setSuccess('Tarea eliminada correctamente.');
-        } catch (error) {
-            console.error('Error al eliminar tarea:', error);
+        } catch (deleteError) {
+            console.error('Error al eliminar tarea:', deleteError);
             setError('No se pudo eliminar la tarea.');
         } finally {
             setUpdatingTaskId(null);
         }
     }
 
+    async function handleDragEnd(event: DragEndEvent): Promise<void> {
+        if (!dragEnabled || !event.over || event.active.id === event.over.id) {
+            return;
+        }
+
+        const reordered = moveTask(
+            tasks,
+            String(event.active.id),
+            String(event.over.id)
+        );
+        if (!reordered) return;
+
+        const previousTasks = tasks;
+        setTasks(reordered);
+        setSavingOrder(true);
+        setError('');
+        setSuccess('');
+
+        try {
+            await saveTaskOrder(reordered.map((task) => task.id));
+            setSuccess('Orden de tareas guardado correctamente.');
+        } catch (orderError) {
+            console.error('Error al guardar el orden:', orderError);
+            setTasks(previousTasks);
+            setError('No se pudo guardar el nuevo orden de las tareas.');
+        } finally {
+            setSavingOrder(false);
+        }
+    }
+
     return (
-        <section>
-            <h2>Mis tareas</h2>
-            <p>Gestioná tus tareas pendientes.</p>
-
-            <form onSubmit={handleSubmit}>
+        <section className="tm-dashboard">
+            <div className="tm-intro">
                 <div>
-                    <label htmlFor="title">Título</label>
-                    <input
-                        id="title"
-                        type="text"
-                        value={title}
-                        onChange={(event) => setTitle(event.target.value)}
-                        required
-                    />
+                    <span className="tm-eyebrow">
+                        TU ESPACIO DE PRODUCTIVIDAD
+                    </span>
+                    <h2>Mis tareas</h2>
+                    <p>
+                        Organizá tus actividades, administrá tus
+                        pendientes y seguí tu progreso.
+                    </p>
                 </div>
+                <span className="tm-intro-chip">
+                    <span aria-hidden="true">✦</span>
+                    Mi espacio
+                </span>
+            </div>
 
-                <div>
-                    <label htmlFor="description">Descripción</label>
-                    <textarea
-                        id="description"
-                        value={description}
-                        onChange={(event) => setDescription(event.target.value)}
+            <EmailSummary />
+            <TaskStats tasks={tasks} />
+
+            <div className="tm-tasks-full-width">
+                <section className="tm-panel tm-list-panel">
+                    <div className="tm-list-heading">
+                        <div>
+                            <h3>Listado de tareas</h3>
+                            <p>Gestioná tus actividades.</p>
+                        </div>
+                        <div className="tm-list-actions">
+                            <span className="tm-task-counter">
+                                {tasks.length} tareas
+                            </span>
+                            <button
+                                ref={addTaskButtonRef}
+                                type="button"
+                                className="tm-add-button"
+                                onClick={openCreateModal}
+                            >
+                                <span aria-hidden="true">＋</span>
+                                Agregar tarea
+                            </button>
+                        </div>
+                    </div>
+
+                    <TaskFilters
+                        filter={filter}
+                        sortByPriority={sortByPriority}
+                        onChangeFilter={setFilter}
+                        onTogglePriority={() => setSortByPriority((previous) => !previous)}
                     />
-                </div>
 
-                <button type="submit" disabled={loading}>
-                    {loading ? 'Guardando...' : 'Agregar tarea'}
-                </button>
-            </form>
+                    <p className="tm-drag-hint" role="status">
+                        {savingOrder
+                            ? 'Guardando el nuevo orden...'
+                            : dragEnabled
+                                ? 'Arrastrá las tareas desde el ícono de puntos para ordenarlas.'
+                                : 'Para reordenar manualmente, seleccioná Todas, desactivá Ordenar por prioridad y terminá cualquier edición.'}
+                    </p>
 
-            {error && <p role="alert">{error}</p>}
-            {success && <p role="status">{success}</p>}
+                    <TaskList
+                        tasks={filteredTasks}
+                        totalTasks={tasks.length}
+                        loading={loadingTasks}
+                        loadError={loadError}
+                        dragEnabled={dragEnabled}
+                        editingTaskId={editingTaskId}
+                        updatingTaskId={updatingTaskId}
+                        onDragEnd={handleDragEnd}
+                        onStartEditing={(task) => setEditingTaskId(task.id)}
+                        onCancelEditing={() => setEditingTaskId(null)}
+                        onSaveEditing={handleSaveEditing}
+                        onToggleCompleted={handleToggleCompleted}
+                        onDelete={handleDeleteTask}
+                    />
+                </section>
+            </div>
 
-            <h3>Listado de tareas</h3>
+            {error && !showCreateModal && (
+                <p role="alert" className="tm-error">{error}</p>
+            )}
+            {success && (
+                <p role="status" className="tm-success">{success}</p>
+            )}
 
-            {loadingTasks ? (
-                <p>Cargando tareas...</p>
-            ) : loadError ? (
-                <p role="alert">{loadError}</p>
-            ) : tasks.length === 0 ? (
-                <p>Todavía no tenés tareas registradas.</p>
-            ) : (
-
-
-                <ul>
-                    {tasks.map((task) => (
-                        <li key={task.id}>
-
-                            {editingTaskId === task.id ? (
-
-                                <form onSubmit={handleSaveEditing}>
-                                    <div>
-                                        <label htmlFor={`edit-title-${task.id}`}>
-                                            Editar título
-                                        </label>
-
-                                        <input
-                                            id={`edit-title-${task.id}`}
-                                            type="text"
-                                            value={editTitle}
-                                            onChange={(event) =>
-                                                setEditTitle(event.target.value)
-                                            }
-                                            required
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label htmlFor={`edit-description-${task.id}`}>
-                                            Editar descripción
-                                        </label>
-
-                                        <textarea
-                                            id={`edit-description-${task.id}`}
-                                            value={editDescription}
-                                            onChange={(event) =>
-                                                setEditDescription(event.target.value)
-                                            }
-                                        />
-                                    </div>
-
-                                    <button
-                                        type="submit"
-                                        disabled={updatingTaskId === task.id}
-                                    >
-                                        {updatingTaskId === task.id
-                                            ? 'Guardando...'
-                                            : 'Guardar cambios'}
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={updatingTaskId === task.id}
-                                        onClick={() => setEditingTaskId(null)}
-                                    >
-                                        Cancelar
-                                    </button>
-                                </form>
-
-                            ) : (
-
-                                <>
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={task.completed}
-                                            disabled={updatingTaskId === task.id}
-                                            onChange={() => {
-                                                void handleToggleCompleted(task);
-                                            }}
-                                        />
-                                        {task.title}
-                                    </label>
-
-                                    <p>{task.description}</p>
-
-                                    <p>
-                                        Estado: {task.completed
-                                            ? 'Completada'
-                                            : 'Pendiente'}
-                                    </p>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => handleStartEditing(task)}
-                                    >
-                                        Editar
-                                    </button>
-                                    <button
-                                        type="button"
-                                        disabled={updatingTaskId === task.id}
-                                        onClick={() => {
-                                            void handleDeleteTask(task);
-                                        }}
-                                    >
-                                        Eliminar
-                                    </button>
-                                </>
-                            )}
-
-                        </li>
-                    ))}
-                </ul>
-
+            {showCreateModal && (
+                <CreateTaskModal
+                    loading={creatingTask}
+                    error={error}
+                    onCreate={handleCreateTask}
+                    onClose={closeCreateModal}
+                />
             )}
         </section>
     );
